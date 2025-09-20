@@ -1,11 +1,11 @@
 # pattern_detectors.py
-# Pattern Detector V8.1 - Minimal Working Version
+# Pattern Detector V8.2 - Pattern Detection with Consolidation Breakout
 
 import numpy as np
 from config import (
     PATTERN_THRESHOLDS, VOLUME_THRESHOLDS, VOLUME_SCORE_POINTS,
     PATTERN_VOLUME_BONUS, MAX_CONFIDENCE_WITHOUT_VOLUME,
-    PATTERN_AGE_LIMITS, INSIDE_BAR_CONFIG
+    PATTERN_AGE_LIMITS, INSIDE_BAR_CONFIG, PATTERN_PARAMS
 )
 
 def analyze_volume_pattern(data, pattern_type, pattern_info):
@@ -46,7 +46,28 @@ def analyze_volume_pattern(data, pattern_type, pattern_info):
         volume_info['volume_status'] = "Weak Volume (" + str(round(volume_multiplier, 1)) + "x)"
     
     # Pattern-specific volume analysis
-    if pattern_type == "Bull Flag":
+    if pattern_type == "Consolidation Breakout":
+        # Volume dry-up during consolidation + expansion on breakout
+        if pattern_info.get('vol_dryup'):
+            volume_score += PATTERN_VOLUME_BONUS["Consolidation Breakout"] * 0.6
+            volume_info['consolidation_volume_dryup'] = True
+        
+        # Breakout volume expansion
+        if volume_multiplier >= 1.8:
+            volume_score += PATTERN_VOLUME_BONUS["Consolidation Breakout"]
+            volume_info['strong_breakout_volume'] = True
+        elif volume_multiplier >= 1.5:
+            volume_score += PATTERN_VOLUME_BONUS["Consolidation Breakout"] * 0.8
+            volume_info['good_breakout_volume'] = True
+        
+        # Volume vs consolidation average
+        if 'consolidation_avg_volume' in pattern_info:
+            consol_vol_ratio = current_volume / pattern_info['consolidation_avg_volume']
+            if consol_vol_ratio >= 2.0:
+                volume_score += 15
+                volume_info['breakout_vs_consolidation'] = f"{consol_vol_ratio:.1f}x consolidation volume"
+    
+    elif pattern_type == "Bull Flag":
         if 'flagpole_gain' in pattern_info:
             try:
                 flagpole_start = min(25, len(data) - 10)
@@ -126,6 +147,237 @@ def analyze_volume_pattern(data, pattern_type, pattern_info):
     
     return volume_score, volume_info
 
+def detect_consolidation_breakout(data, macd_line, signal_line, histogram, market_context, timeframe="daily"):
+    """Detect Consolidation + Breakout pattern"""
+    confidence = 0
+    pattern_info = {}
+    
+    if len(data) < 30:
+        return confidence, pattern_info
+    
+    # Get pattern parameters
+    params = PATTERN_PARAMS["Consolidation Breakout"]
+    
+    # Choose timeframe-specific parameters
+    if timeframe == "4h":
+        perc_window = params["percentile_window_4h"]
+        box_bars = params["box_bars_4h"]
+        pattern_info['timeframe'] = '4-Hour'
+    elif timeframe == "weekly":
+        perc_window = params["percentile_window_weekly"]
+        box_bars = params["box_bars_weekly"]
+        pattern_info['timeframe'] = 'Weekly'
+    else:
+        perc_window = params["percentile_window_daily"]
+        box_bars = params["box_bars_daily"]
+        pattern_info['timeframe'] = 'Daily'
+    
+    # Ensure we have enough data
+    if len(data) < box_bars + 10:
+        return confidence, pattern_info
+    
+    # 1) CONSOLIDATION ANALYSIS (using prior bars to avoid look-ahead bias)
+    consolidation_data = data.iloc[-(box_bars+1):-1]  # Exclude current bar
+    
+    if len(consolidation_data) < box_bars:
+        return confidence, pattern_info
+    
+    # Box dimensions
+    box_high = consolidation_data['High'].max()
+    box_low = consolidation_data['Low'].min()
+    box_width_pct = (box_high - box_low) / data['Close'].iloc[-2]
+    
+    pattern_info['box_high'] = box_high
+    pattern_info['box_low'] = box_low
+    pattern_info['box_width_pct'] = box_width_pct
+    pattern_info['box_bars'] = box_bars
+    
+    # Consolidation criteria (any of these qualifies)
+    consolidation_flags = []
+    
+    # ATR percentile check
+    if 'ATRp_pct' in data.columns and not data['ATRp_pct'].isna().iloc[-1]:
+        atrp_pct = data['ATRp_pct'].iloc[-1]
+        if atrp_pct <= params['atrp_percentile_cut']:
+            consolidation_flags.append('low_atr')
+            confidence += 15
+            pattern_info['low_atr_percentile'] = f"{atrp_pct:.1f}%"
+    
+    # Bollinger Band width percentile check
+    if 'BBwidth20_pct' in data.columns and not data['BBwidth20_pct'].isna().iloc[-1]:
+        bbw_pct = data['BBwidth20_pct'].iloc[-1]
+        if bbw_pct <= params['bbw_percentile_cut']:
+            consolidation_flags.append('tight_bb')
+            confidence += 15
+            pattern_info['tight_bb_percentile'] = f"{bbw_pct:.1f}%"
+    
+    # NR cluster check
+    if 'NR4' in data.columns and 'NR7' in data.columns:
+        recent_nr4 = data['NR4'].tail(params['nr_cluster_lookback']).sum()
+        recent_nr7 = data['NR7'].tail(params['nr_cluster_lookback']).sum()
+        nr_cluster = (recent_nr4 + recent_nr7) >= params['nr_cluster_min_hits']
+        
+        if nr_cluster:
+            consolidation_flags.append('nr_cluster')
+            confidence += params['nr_cluster_bonus']
+            pattern_info['nr_cluster'] = f"{int(recent_nr4 + recent_nr7)} NR bars"
+    
+    # Box tightness check
+    if box_width_pct <= params['box_width_max']:
+        consolidation_flags.append('tight_box')
+        confidence += params['consolidation_bonus']
+        pattern_info['tight_box'] = f"{box_width_pct:.1%} range"
+    
+    # MA pinch check
+    if 'MA_pinch' in data.columns and not data['MA_pinch'].isna().iloc[-1]:
+        ma_pinch = data['MA_pinch'].iloc[-1]
+        if ma_pinch <= params['ma_pinch_max']:
+            consolidation_flags.append('ma_pinch')
+            confidence += params['ma_pinch_bonus']
+            pattern_info['ma_pinch'] = f"{ma_pinch:.1%} MA spread"
+    
+    # Volume dry-up check (bonus)
+    if 'Vol50' in data.columns:
+        recent_volume_data = data.tail(params['vol_dryup_k'])
+        vol_dryup_bars = (recent_volume_data['Volume'] < params['vol_dryup_mult'] * recent_volume_data['Vol50']).sum()
+        vol_dryup_ratio = vol_dryup_bars / len(recent_volume_data)
+        
+        if vol_dryup_ratio >= params['vol_dryup_threshold']:
+            consolidation_flags.append('volume_dryup')
+            confidence += params['volume_dryup_bonus']
+            pattern_info['vol_dryup'] = True
+            pattern_info['vol_dryup_ratio'] = f"{vol_dryup_ratio:.1%}"
+            
+            # Store consolidation average volume for later comparison
+            pattern_info['consolidation_avg_volume'] = consolidation_data['Volume'].mean()
+    
+    # Must have at least one consolidation criterion
+    if not consolidation_flags:
+        return confidence, pattern_info
+    
+    # Add base confidence for consolidation detection
+    confidence += params['min_confidence_base']
+    pattern_info['consolidation_criteria'] = consolidation_flags
+    
+    # 2) BREAKOUT ANALYSIS (current bar)
+    current_bar = data.iloc[-1]
+    
+    # Price breakout check
+    price_breakout = current_bar['Close'] > box_high
+    
+    # True Range expansion check
+    tr_breakout = False
+    if 'TR' in data.columns and 'TR20' in data.columns:
+        current_tr = current_bar['TR']
+        avg_tr = data['TR20'].iloc[-2]  # Use previous bar's 20-period average
+        
+        if current_tr > params['breakout_tr_mult'] * avg_tr:
+            tr_breakout = True
+            pattern_info['tr_expansion'] = f"{current_tr / avg_tr:.1f}x avg TR"
+    
+    # Volume breakout check
+    vol_breakout = False
+    if 'Vol50' in data.columns:
+        current_volume = current_bar['Volume']
+        avg_volume = current_bar['Vol50']
+        
+        if current_volume >= params['breakout_vol_mult'] * avg_volume:
+            vol_breakout = True
+            pattern_info['vol_expansion'] = f"{current_volume / avg_volume:.1f}x avg volume"
+    
+    # Breakout confirmation
+    breakout_confirmed = price_breakout and tr_breakout and vol_breakout
+    
+    if breakout_confirmed:
+        confidence += params['breakout_bonus']
+        pattern_info['breakout_confirmed'] = True
+        pattern_info['breakout_type'] = 'Full confirmation (Price + TR + Volume)'
+    elif price_breakout and (tr_breakout or vol_breakout):
+        confidence += params['breakout_bonus'] * 0.7
+        pattern_info['partial_breakout'] = True
+        components = ['Price']
+        if tr_breakout:
+            components.append('True Range')
+        if vol_breakout:
+            components.append('Volume')
+        pattern_info['breakout_type'] = f'Partial confirmation ({" + ".join(components)})'
+    elif price_breakout:
+        confidence += params['breakout_bonus'] * 0.4
+        pattern_info['price_breakout_only'] = True
+        pattern_info['breakout_type'] = 'Price breakout only (await confirmation)'
+    
+    # Store breakout status
+    pattern_info['price_breakout'] = price_breakout
+    pattern_info['tr_breakout'] = tr_breakout
+    pattern_info['vol_breakout'] = vol_breakout
+    
+    # 3) TECHNICAL CONFIRMATION
+    if macd_line.iloc[-1] > signal_line.iloc[-1]:
+        confidence += 10
+        pattern_info['macd_bullish'] = True
+    
+    if histogram.iloc[-1] > histogram.iloc[-3]:
+        confidence += 8
+        pattern_info['momentum_improving'] = True
+    
+    # 4) LIQUIDITY CHECK
+    if 'Avg_Dollar_Volume' in data.columns:
+        avg_dollar_volume = data['Avg_Dollar_Volume'].tail(20).mean()
+        if avg_dollar_volume >= params['min_liquidity_usd']:
+            confidence += 5
+            pattern_info['sufficient_liquidity'] = True
+        else:
+            confidence *= 0.9
+            pattern_info['limited_liquidity'] = f"${avg_dollar_volume/1e6:.1f}M avg"
+    
+    # 5) POSITION RELATIVE TO BOX
+    current_price = current_bar['Close']
+    if current_price >= box_high * 0.995:  # Within 0.5% of breakout
+        confidence += 10
+        pattern_info['near_breakout'] = True
+    elif current_price >= (box_high + box_low) / 2:  # Above box midpoint
+        confidence += 5
+        pattern_info['above_midpoint'] = True
+    
+    # Apply volume analysis
+    volume_score, volume_info = analyze_volume_pattern(data, "Consolidation Breakout", pattern_info)
+    confidence += volume_score
+    pattern_info.update(volume_info)
+    
+    # Apply volume confirmation cap
+    if not (volume_info.get('good_volume') or volume_info.get('strong_volume') or volume_info.get('exceptional_volume')):
+        confidence = min(confidence, MAX_CONFIDENCE_WITHOUT_VOLUME)
+        pattern_info['confidence_capped'] = "No volume confirmation"
+    
+    # Age penalty check
+    if breakout_confirmed:
+        # For confirmed breakouts, check how recent the breakout is
+        age_limit = PATTERN_AGE_LIMITS.get(timeframe, PATTERN_AGE_LIMITS['daily'])
+        breakout_age = 1  # Current bar breakout
+        
+        if breakout_age > age_limit.get('Consolidation Breakout', 12):
+            confidence *= 0.8
+            pattern_info['breakout_aging'] = True
+    else:
+        # For consolidations without breakout, check consolidation age
+        consolidation_age = box_bars
+        max_consolidation_age = PATTERN_THRESHOLDS['Consolidation Breakout']['max_consolidation_bars']
+        
+        if consolidation_age > max_consolidation_age:
+            confidence *= 0.7
+            pattern_info['consolidation_stale'] = True
+            pattern_info['consolidation_age'] = f"{consolidation_age} bars"
+    
+    # Quality filters
+    if box_width_pct < PATTERN_THRESHOLDS['Consolidation Breakout']['min_box_height']:
+        confidence *= 0.8
+        pattern_info['very_tight_range'] = f"{box_width_pct:.1%}"
+    elif box_width_pct > PATTERN_THRESHOLDS['Consolidation Breakout']['max_box_height']:
+        confidence *= 0.6
+        pattern_info['wide_range'] = f"{box_width_pct:.1%}"
+    
+    return confidence, pattern_info
+
 def detect_inside_bar(data, macd_line, signal_line, histogram, market_context, timeframe="daily"):
     """Detect Inside Bar pattern"""
     confidence = 0
@@ -139,6 +391,10 @@ def detect_inside_bar(data, macd_line, signal_line, histogram, market_context, t
         max_lookback_range = range(-1, -7, -1)
         aging_threshold = -8
         pattern_info['timeframe'] = 'Weekly'
+    elif timeframe == "4h":
+        max_lookback_range = range(-1, -8, -1)
+        aging_threshold = -10
+        pattern_info['timeframe'] = '4-Hour'
     else:
         max_lookback_range = range(-1, -5, -1)
         aging_threshold = -6
@@ -190,7 +446,7 @@ def detect_inside_bar(data, macd_line, signal_line, histogram, market_context, t
     if not (mother_is_green and inside_is_red):
         return confidence, pattern_info
     
-    base_confidence = 35 if timeframe == "1wk" else 30
+    base_confidence = 35 if timeframe in ["1wk", "4h"] else 30
     confidence += base_confidence
     
     pattern_info['mother_bar_high'] = mother_bar['High']
@@ -220,9 +476,19 @@ def detect_inside_bar(data, macd_line, signal_line, histogram, market_context, t
         pattern_info['size_ratio'] = str(round(size_ratio * 100, 1)) + "%"
         
         thresholds = PATTERN_THRESHOLDS["Inside Bar"]
-        tight_threshold = thresholds['tight_consolidation_weekly'] if timeframe == "1wk" else thresholds['tight_consolidation']
-        good_threshold = thresholds['good_consolidation_weekly'] if timeframe == "1wk" else thresholds['good_consolidation']
-        moderate_threshold = thresholds['moderate_consolidation_weekly'] if timeframe == "1wk" else thresholds['moderate_consolidation']
+        
+        if timeframe == "1wk":
+            tight_threshold = thresholds['tight_consolidation_weekly']
+            good_threshold = thresholds['good_consolidation_weekly']
+            moderate_threshold = thresholds['moderate_consolidation_weekly']
+        elif timeframe == "4h":
+            tight_threshold = thresholds['tight_consolidation_4h']
+            good_threshold = thresholds['good_consolidation_4h']
+            moderate_threshold = thresholds['moderate_consolidation_4h']
+        else:
+            tight_threshold = thresholds['tight_consolidation']
+            good_threshold = thresholds['good_consolidation']
+            moderate_threshold = thresholds['moderate_consolidation']
         
         if size_ratio < tight_threshold:
             confidence += 20
@@ -259,7 +525,7 @@ def detect_inside_bar(data, macd_line, signal_line, histogram, market_context, t
         pattern_info['confidence_capped'] = "No volume confirmation"
     
     if mother_bar_idx <= aging_threshold:
-        aging_penalty = 0.7 if timeframe == "1wk" else 0.8
+        aging_penalty = 0.7 if timeframe in ["1wk", "4h"] else 0.8
         confidence *= aging_penalty
         pattern_info['pattern_aging'] = True
         pattern_info['age_periods'] = abs(mother_bar_idx)
@@ -636,27 +902,9 @@ def detect_inverse_head_shoulders(data, macd_line, signal_line, histogram, marke
         pattern_info['momentum_improving'] = True
     
     # Volume analysis
-    avg_volume = data['Volume'].tail(20).mean()
-    current_volume = data['Volume'].iloc[-1]
-    volume_multiplier = current_volume / avg_volume
-    
-    volume_score = 0
-    if volume_multiplier >= 2.0:
-        volume_score += 25
-        pattern_info['exceptional_volume'] = True
-        pattern_info['volume_status'] = "Exceptional Volume (" + str(round(volume_multiplier, 1)) + "x)"
-    elif volume_multiplier >= 1.5:
-        volume_score += 20
-        pattern_info['strong_volume'] = True
-        pattern_info['volume_status'] = "Strong Volume (" + str(round(volume_multiplier, 1)) + "x)"
-    elif volume_multiplier >= 1.3:
-        volume_score += 15
-        pattern_info['good_volume'] = True
-        pattern_info['volume_status'] = "Good Volume (" + str(round(volume_multiplier, 1)) + "x)"
-    else:
-        pattern_info['volume_status'] = "Weak Volume (" + str(round(volume_multiplier, 1)) + "x)"
-    
+    volume_score, volume_info = analyze_volume_pattern(data, "Inverse Head Shoulders", pattern_info)
     confidence += volume_score
+    pattern_info.update(volume_info)
     
     # Apply volume confirmation cap
     if not (pattern_info.get('good_volume') or pattern_info.get('strong_volume') or pattern_info.get('exceptional_volume')):
@@ -695,7 +943,11 @@ def detect_pattern(data, pattern_type, market_context, timeframe="daily"):
     pattern_info = {}
     
     # Route to appropriate pattern detector
-    if pattern_type == "Flat Top Breakout":
+    if pattern_type == "Consolidation Breakout":
+        confidence, pattern_info = detect_consolidation_breakout(data, macd_line, signal_line, histogram, market_context, timeframe)
+        confidence = min(confidence, 100)
+        
+    elif pattern_type == "Flat Top Breakout":
         confidence, pattern_info = detect_flat_top(data, macd_line, signal_line, histogram, market_context)
         confidence = min(confidence, 100)
         
@@ -720,4 +972,4 @@ def detect_pattern(data, pattern_type, market_context, timeframe="daily"):
     pattern_info['signal_line'] = signal_line
     pattern_info['histogram'] = histogram
     
-    return confidence >= 55, confidence, pattern_info
+    return confidence >= 45, confidence, pattern_info
