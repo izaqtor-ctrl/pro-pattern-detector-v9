@@ -1,5 +1,5 @@
 # main.py
-# Pattern Detector V8.1 - Main Streamlit Application with Inverse Head & Shoulders
+# Pattern Detector V8.2 - Main Streamlit Application with Consolidation Breakout
 
 import streamlit as st
 import pandas as pd
@@ -34,38 +34,48 @@ def main():
     # Market Timing Context Display
     market_context = display_market_context()
     
-    # Info about modular architecture with new pattern
-    with st.expander("What's New in v8.1 - Inverse Head & Shoulders Pattern"):
+    # Info about new Consolidation Breakout pattern
+    with st.expander("What's New in v8.2 - Consolidation Breakout Pattern"):
         st.markdown("""
-        ### New Pattern: Inverse Head & Shoulders
+        ### New Pattern: Consolidation Breakout
         
-        **Research-Based Implementation**:
-        - 89% success rate with 45% average price increase (academic research)
-        - Professional-grade 5/5 pivot detection system
-        - Advanced symmetry validation (time + price weighted)
-        - Impulsive move validation (eliminates choppy patterns)
-        - Classic volume pattern recognition (diminishing volume)
+        **Professional-Grade Consolidation Detection**:
+        - Multi-timeframe support (Daily/4-Hour/Weekly)
+        - Advanced volatility analysis (ATR percentiles, Bollinger Band width)
+        - NR4/NR7 cluster detection for tight ranges
+        - Moving Average convergence analysis (MA pinch)
+        - Volume dry-up confirmation during consolidation
+        
+        **Breakout Confirmation System**:
+        - **Price breakout** above consolidation box high
+        - **True Range expansion** (1.5x+ average TR)
+        - **Volume surge** (1.5x+ average volume with tier bonuses)
+        - **Measured move targets** based on box height
+        - **Risk-based stops** with volatility floor protection
         
         **Key Features**:
-        - **Neckline breakout entry** with 0.5% buffer
-        - **Head depth projection targets** (measured moves)
-        - **Multi-timeframe support** (daily/weekly with different pivot strengths)
-        - **Pattern invalidation warnings** (price below head = major issue)
-        - **Educational chart annotations** (shows left shoulder, head, right shoulder, neckline)
+        - **Visual consolidation box** with width/duration stats
+        - **Breakout confirmation markers** (Full/Partial/Price-only)
+        - **Liquidity filtering** ($20M+ average dollar volume)
+        - **Box height projection** targets + 2R/3R minimums
+        - **Educational annotations** showing criteria met
         
-        **Volume Analysis**:
-        - Classic pattern: Left shoulder > Head > Right shoulder volume
-        - Breakout confirmation requires volume expansion
-        - Without volume confirmation: confidence capped at 70%
+        **Consolidation Criteria** (any qualifies):
+        - ATR% in bottom 15% of lookback window
+        - Bollinger Band width in bottom 15%
+        - NR4/NR7 cluster (2+ occurrences in 5 bars)
+        - Box tightness ≤ 6% of price range
+        - MA pinch ≤ 2% spread (EMA 10/20/50)
+        - Volume dry-up (60%+ bars below 70% of SMA50)
         
-        **All V8.0 Features Maintained**:
-        - Inside Bar pattern with triple targets
-        - Multi-timeframe support (Daily/Weekly)
-        - Volume confirmation system
+        **All V8.1 Features Maintained**:
+        - Inverse Head & Shoulders pattern
+        - Inside Bar with triple targets
+        - Enhanced volume confirmation system
         - Market timing adjustments
-        - Enhanced risk/reward calculations
+        - Professional risk/reward calculations
         
-        The inverse head and shoulders is considered one of the most reliable bullish reversal patterns in technical analysis.
+        This pattern detects the "coiling spring" effect - tight consolidations followed by explosive breakouts.
         """)
     
     # Sidebar Configuration
@@ -87,7 +97,14 @@ def main():
         PERIOD_OPTIONS, 
         index=PERIOD_OPTIONS.index(DEFAULT_PERIOD)
     )
-    period = "1wk" if period_display == "1wk (Weekly)" else period_display
+    
+    # Handle different timeframe formats
+    if period_display == "1wk (Weekly)":
+        period = "1wk"
+    elif period_display == "4h (4-Hour)":
+        period = "4h"
+    else:
+        period = period_display
     
     # Confidence Threshold
     min_confidence = st.sidebar.slider(
@@ -110,18 +127,35 @@ def main():
     st.sidebar.subheader("Timing Filters")
     show_timing_adjustments = st.sidebar.checkbox("Show Timing Adjustments", value=True)
     
+    # Consolidation Breakout specific filters
+    if "Consolidation Breakout" in selected_patterns:
+        st.sidebar.subheader("Consolidation Filters")
+        require_breakout_confirmation = st.sidebar.checkbox("Require Full Breakout Confirmation", value=False)
+        min_consolidation_bars = st.sidebar.slider("Min Consolidation Bars:", 8, 50, 15)
+        max_box_width = st.sidebar.slider("Max Box Width %:", 2, 15, 6)
+    
     # Analysis Button
     if st.sidebar.button("Analyze", type="primary"):
         if tickers and selected_patterns:
+            consolidation_filters = {}
+            if "Consolidation Breakout" in selected_patterns:
+                consolidation_filters = {
+                    'require_breakout_confirmation': require_breakout_confirmation,
+                    'min_consolidation_bars': min_consolidation_bars,
+                    'max_box_width': max_box_width / 100  # Convert to decimal
+                }
+            
             run_analysis(
                 tickers, selected_patterns, period, period_display, min_confidence,
-                require_volume, volume_threshold, show_timing_adjustments, market_context
+                require_volume, volume_threshold, show_timing_adjustments, market_context,
+                consolidation_filters
             )
         else:
             st.error("Please enter tickers and select at least one pattern.")
 
 def run_analysis(tickers, selected_patterns, period, period_display, min_confidence,
-                require_volume, volume_threshold, show_timing_adjustments, market_context):
+                require_volume, volume_threshold, show_timing_adjustments, market_context,
+                consolidation_filters=None):
     """Run the pattern analysis"""
     
     ticker_list = [t.strip().upper() for t in tickers.split(',')]
@@ -134,15 +168,21 @@ def run_analysis(tickers, selected_patterns, period, period_display, min_confide
         st.subheader(f"{ticker}")
         
         # Fetch and process data
-        data, summary, status_message = fetch_and_process_data(ticker, period)
+        data, summary, status_message, timeframe = fetch_and_process_data(ticker, period)
         
         if data is None:
-            st.error(f"⚠ {status_message}")
+            st.error(f"⚠️ {status_message}")
             continue
         
         # Analyze each selected pattern
         for pattern in selected_patterns:
-            detected, confidence, info = detect_pattern(data, pattern, market_context, period)
+            detected, confidence, info = detect_pattern(data, pattern, market_context, timeframe)
+            
+            # Apply consolidation-specific filters
+            if pattern == "Consolidation Breakout" and consolidation_filters:
+                skip_pattern = apply_consolidation_filters(info, consolidation_filters)
+                if skip_pattern:
+                    continue
             
             # Apply timing adjustments
             confidence, info = adjust_confidence_for_timing(confidence, info, market_context)
@@ -177,13 +217,35 @@ def run_analysis(tickers, selected_patterns, period, period_display, min_confide
                 
             else:
                 if not skip_pattern:
-                    st.info(f"⚠ {pattern}: {confidence:.0f}% (below threshold)")
+                    st.info(f"ℹ️ {pattern}: {confidence:.0f}% (below threshold)")
     
     # Display summary
     if results:
         display_summary(results, market_context)
     else:
-        st.info("📊 No patterns detected. Try lowering the confidence threshold or adjusting volume filters.")
+        st.info("📊 No patterns detected. Try lowering the confidence threshold or adjusting filters.")
+
+def apply_consolidation_filters(pattern_info, filters):
+    """Apply consolidation-specific filters"""
+    if not filters:
+        return False
+    
+    # Require full breakout confirmation
+    if filters.get('require_breakout_confirmation'):
+        if not pattern_info.get('breakout_confirmed'):
+            return True  # Skip this pattern
+    
+    # Check consolidation bar count
+    box_bars = pattern_info.get('box_bars', 0)
+    if box_bars < filters.get('min_consolidation_bars', 0):
+        return True  # Skip this pattern
+    
+    # Check box width
+    box_width_pct = pattern_info.get('box_width_pct', 0)
+    if box_width_pct > filters.get('max_box_width', 1.0):
+        return True  # Skip this pattern
+    
+    return False  # Don't skip
 
 def display_pattern_results(ticker, pattern, confidence, info, levels, data, 
                            market_context, period, show_timing_adjustments, timeframe_info):
@@ -283,7 +345,9 @@ def display_pattern_info(pattern, info, levels, market_context):
     st.write(f"• **Entry Timing**: {market_context['entry_timing']}")
     
     # Pattern-specific information
-    if pattern == "Inside Bar":
+    if pattern == "Consolidation Breakout":
+        display_consolidation_breakout_info(info, levels)
+    elif pattern == "Inside Bar":
         display_inside_bar_info(info, levels)
     elif pattern == "Inverse Head Shoulders":
         display_inverse_head_shoulders_info(info, levels)
@@ -293,10 +357,57 @@ def display_pattern_info(pattern, info, levels, market_context):
     # Technical indicators
     display_technical_info(info)
 
+def display_consolidation_breakout_info(info, levels):
+    """Display Consolidation Breakout specific information"""
+    # Box characteristics
+    if info.get('box_width_pct'):
+        st.write(f"📦 Box width: {info['box_width_pct']:.1%}")
+    if info.get('box_bars'):
+        st.write(f"📊 Consolidation: {info['box_bars']} bars")
+    
+    # Consolidation criteria met
+    criteria = info.get('consolidation_criteria', [])
+    if criteria:
+        criteria_display = {
+            'low_atr': 'Low ATR volatility',
+            'tight_bb': 'Tight Bollinger Bands', 
+            'nr_cluster': 'NR4/NR7 cluster',
+            'tight_box': 'Tight price box',
+            'ma_pinch': 'MA convergence',
+            'volume_dryup': 'Volume dry-up'
+        }
+        st.success("✅ **Criteria Met**:")
+        for criterion in criteria:
+            display_name = criteria_display.get(criterion, criterion)
+            st.write(f"  • {display_name}")
+    
+    # Breakout status
+    if info.get('breakout_confirmed'):
+        st.success("🚀 **Full Breakout Confirmed**")
+        st.write(f"  • {info.get('breakout_type', 'Complete confirmation')}")
+    elif info.get('partial_breakout'):
+        st.warning("⚡ **Partial Breakout**")
+        st.write(f"  • {info.get('breakout_type', 'Partial confirmation')}")
+    elif info.get('price_breakout_only'):
+        st.info("📈 **Price Breakout Only**")
+        st.write(f"  • {info.get('breakout_type', 'Awaiting volume/TR confirmation')}")
+    
+    # Technical details
+    if info.get('tr_expansion'):
+        st.write(f"📈 True Range: {info['tr_expansion']}")
+    if info.get('vol_expansion'):
+        st.write(f"📊 Volume: {info['vol_expansion']}")
+    if info.get('vol_dryup_ratio'):
+        st.write(f"🔇 Dry-up: {info['vol_dryup_ratio']} of bars")
+    
+    # Measured move target
+    if 'measured_move_target' in levels:
+        st.success(f"🎯 **Measured Move**: ${levels['measured_move_target']:.2f}")
+
 def display_inverse_head_shoulders_info(info, levels):
     """Display Inverse Head and Shoulders specific information"""
     if info.get('head_depth_percent'):
-        st.write(f"🏔️ Head depth: {info['head_depth_percent']}")
+        st.write(f"🔽 Head depth: {info['head_depth_percent']}")
         st.success(f"🎯 **Measured Move**: ${levels['reward1']:.2f}")
     if info.get('shoulder_symmetry_score'):
         st.write(f"⚖️ Symmetry: {info['shoulder_symmetry_score']}")
@@ -351,8 +462,6 @@ def display_technical_info(info):
 
 def create_result_dict(ticker, pattern, confidence, info, levels, timeframe_info):
     """Create result dictionary for summary table"""
-    timing_status = f"{info.get('day', 'Unknown')} ({info.get('gap_risk', 'Unknown')} Gap Risk)"
-    
     result_dict = {
         'Ticker': ticker,
         'Pattern': pattern,
@@ -373,6 +482,13 @@ def create_result_dict(ticker, pattern, confidence, info, levels, timeframe_info
     if levels.get('has_target3'):
         result_dict['Target 3'] = f"${levels['target3']:.2f}"
         result_dict['R/R 3'] = f"{levels['rr_ratio3']:.1f}:1"
+    
+    # Add consolidation-specific info
+    if pattern == "Consolidation Breakout":
+        breakout_status = "✅ Confirmed" if info.get('breakout_confirmed') else "⚡ Partial" if info.get('partial_breakout') else "📈 Price Only"
+        result_dict['Breakout'] = breakout_status
+        if info.get('box_width_pct'):
+            result_dict['Box Width'] = f"{info['box_width_pct']:.1%}"
     
     return result_dict
 
@@ -400,8 +516,8 @@ def display_summary(results, market_context):
         vol_quality = (high_vol_count / len(results)) * 100 if results else 0
         st.metric("High Volume %", f"{vol_quality:.0f}%")
     with col5:
-        ihs_count = sum(1 for r in results if r['Pattern'] == 'Inverse Head Shoulders')
-        st.metric("Inverse H&S", ihs_count)
+        consol_count = sum(1 for r in results if r['Pattern'] == 'Consolidation Breakout')
+        st.metric("Consolidation", consol_count)
     
     # Pattern distribution
     if len(results) > 1:
@@ -422,14 +538,20 @@ def display_pattern_distribution(results):
     st.subheader("📊 Pattern Distribution")
     pattern_counts = {}
     timeframe_counts = {}
+    breakout_status_counts = {}
     
     for result in results:
         pattern = result['Pattern']
         timeframe = result['Timeframe']
         pattern_counts[pattern] = pattern_counts.get(pattern, 0) + 1
         timeframe_counts[timeframe] = timeframe_counts.get(timeframe, 0) + 1
+        
+        # Track consolidation breakout status
+        if pattern == 'Consolidation Breakout' and 'Breakout' in result:
+            status = result['Breakout']
+            breakout_status_counts[status] = breakout_status_counts.get(status, 0) + 1
     
-    col1, col2 = st.columns(2)
+    col1, col2, col3 = st.columns(3)
     with col1:
         st.write("**By Pattern:**")
         for pattern, count in pattern_counts.items():
@@ -441,6 +563,12 @@ def display_pattern_distribution(results):
         for timeframe, count in timeframe_counts.items():
             pct = (count / len(results)) * 100
             st.write(f"• {timeframe}: {count} ({pct:.0f}%)")
+    
+    with col3:
+        if breakout_status_counts:
+            st.write("**Breakout Status:**")
+            for status, count in breakout_status_counts.items():
+                st.write(f"• {status}: {count}")
 
 if __name__ == "__main__":
     main()
