@@ -1,5 +1,5 @@
-# chart_generator.py - V8.1 with Inverse Head & Shoulders
-# Pattern Detector V8.1 - Chart Creation Functions
+# chart_generator.py - V8.2 with Consolidation Breakout
+# Pattern Detector V8.2 - Chart Creation Functions
 
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
@@ -8,7 +8,7 @@ from config import CHART_CONFIG
 
 def create_chart(data, ticker, pattern_type, pattern_info, levels, market_context, timeframe):
     """Create enhanced chart with volume analysis and timing context"""
-    timeframe_label = "Weekly" if timeframe == "1wk" else "Daily"
+    timeframe_label = "Weekly" if timeframe == "1wk" else "4-Hour" if timeframe == "4h" else "Daily"
     
     fig = make_subplots(
         rows=3, cols=1,
@@ -134,7 +134,9 @@ def add_pattern_annotations(fig, data, pattern_type, pattern_info, levels):
     
     try:
         # Add pattern-specific measured move annotations
-        if pattern_type == "Inside Bar":
+        if pattern_type == "Consolidation Breakout":
+            add_consolidation_breakout_annotations(fig, data, pattern_info, levels)
+        elif pattern_type == "Inside Bar":
             add_inside_bar_annotations(fig, data, pattern_info, levels)
         elif pattern_type == "Bull Flag":
             add_bull_flag_annotations(fig, data, pattern_info, levels)
@@ -153,9 +155,153 @@ def add_pattern_annotations(fig, data, pattern_type, pattern_info, levels):
     except Exception as e:
         print(f"Error in invalidation warnings: {e}")
 
+def add_consolidation_box(fig, data, pattern_info):
+    """Add consolidation box visualization"""
+    box_high = pattern_info.get('box_high')
+    box_low = pattern_info.get('box_low')
+    box_bars = pattern_info.get('box_bars', 15)
+    
+    if not (box_high and box_low):
+        return
+    
+    # Calculate box start position
+    box_start_idx = len(data) - box_bars - 1
+    box_end_idx = len(data) - 1
+    
+    if box_start_idx < 0:
+        box_start_idx = 0
+    
+    # Add horizontal lines for box boundaries
+    fig.add_hline(
+        y=box_high,
+        line_color=CHART_CONFIG['line_colors']['consolidation_box'],
+        line_width=CHART_CONFIG['consolidation_box']['line_width'],
+        line_dash=CHART_CONFIG['consolidation_box']['line_dash'],
+        annotation_text=f"Box High: ${box_high:.2f}",
+        row=1, col=1
+    )
+    
+    fig.add_hline(
+        y=box_low,
+        line_color=CHART_CONFIG['line_colors']['consolidation_box'],
+        line_width=CHART_CONFIG['consolidation_box']['line_width'],
+        line_dash=CHART_CONFIG['consolidation_box']['line_dash'],
+        annotation_text=f"Box Low: ${box_low:.2f}",
+        row=1, col=1
+    )
+    
+    # Add shaded rectangle for consolidation period
+    box_start_date = data.index[box_start_idx]
+    box_end_date = data.index[box_end_idx]
+    
+    fig.add_shape(
+        type="rect",
+        x0=box_start_date,
+        y0=box_low,
+        x1=box_end_date,
+        y1=box_high,
+        line=dict(
+            color=CHART_CONFIG['line_colors']['consolidation_box'],
+            width=1,
+            dash="dash"
+        ),
+        fillcolor=CHART_CONFIG['consolidation_box']['fill_color'],
+        opacity=CHART_CONFIG['consolidation_box']['fill_opacity'],
+        row=1, col=1
+    )
+
+def add_consolidation_breakout_annotations(fig, data, pattern_info, levels):
+    """Add Consolidation Breakout specific annotations"""
+    # Add consolidation box
+    add_consolidation_box(fig, data, pattern_info)
+    
+    # Box dimensions annotation
+    box_width_pct = pattern_info.get('box_width_pct', 0)
+    box_bars = pattern_info.get('box_bars', 0)
+    
+    fig.add_annotation(
+        x=data.index[-5],
+        y=levels['entry'] * 1.01,
+        text=f"CONSOLIDATION<br>Width: {box_width_pct:.1%}<br>Bars: {box_bars}",
+        showarrow=True,
+        arrowhead=2,
+        arrowcolor=CHART_CONFIG['line_colors']['consolidation_box'],
+        bgcolor="rgba(128,0,128,0.1)",
+        bordercolor=CHART_CONFIG['line_colors']['consolidation_box'],
+        font=dict(size=10)
+    )
+    
+    # Breakout confirmation annotation
+    if pattern_info.get('breakout_confirmed'):
+        fig.add_annotation(
+            x=data.index[-1],
+            y=data['High'].iloc[-1],
+            text="BREAKOUT<br>CONFIRMED",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor=CHART_CONFIG['line_colors']['breakout_marker'],
+            bgcolor="rgba(255,215,0,0.2)",
+            bordercolor=CHART_CONFIG['line_colors']['breakout_marker'],
+            font=dict(size=11, color="black")
+        )
+    elif pattern_info.get('partial_breakout'):
+        fig.add_annotation(
+            x=data.index[-1],
+            y=data['High'].iloc[-1],
+            text="PARTIAL<br>BREAKOUT",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="orange",
+            bgcolor="rgba(255,165,0,0.2)",
+            bordercolor="orange",
+            font=dict(size=10)
+        )
+    
+    # Consolidation criteria annotation
+    criteria = pattern_info.get('consolidation_criteria', [])
+    if criteria:
+        criteria_text = "CRITERIA MET:<br>" + "<br>".join([
+            "Low ATR" if "low_atr" in criteria else "",
+            "Tight BB" if "tight_bb" in criteria else "",
+            "NR Cluster" if "nr_cluster" in criteria else "",
+            "Tight Box" if "tight_box" in criteria else "",
+            "MA Pinch" if "ma_pinch" in criteria else "",
+            "Vol Dry-up" if "volume_dryup" in criteria else ""
+        ]).replace("<br><br>", "<br>").strip("<br>")
+        
+        fig.add_annotation(
+            x=data.index[-8],
+            y=pattern_info.get('box_low', levels['stop']) * 1.02,
+            text=criteria_text,
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="blue",
+            bgcolor="rgba(0,0,255,0.1)",
+            bordercolor="blue",
+            font=dict(size=9)
+        )
+    
+    # Measured move annotation
+    if 'measured_move_target' in levels:
+        measured_target = levels['measured_move_target']
+        fig.add_annotation(
+            x=data.index[-3],
+            y=measured_target,
+            text=f"MEASURED MOVE<br>${measured_target:.2f}",
+            showarrow=True,
+            arrowhead=2,
+            arrowcolor="lime",
+            bgcolor="rgba(0,255,0,0.1)",
+            bordercolor="lime",
+            font=dict(size=10)
+        )
+
 def add_pattern_structure_annotations(fig, data, pattern_type, pattern_info):
     """Add structural annotations to show pattern formation points"""
-    if pattern_type == "Inside Bar":
+    if pattern_type == "Consolidation Breakout":
+        # Consolidation box is handled in add_consolidation_breakout_annotations
+        pass
+    elif pattern_type == "Inside Bar":
         add_inside_bar_structure(fig, data, pattern_info)
     elif pattern_type == "Bull Flag":
         add_bull_flag_structure(fig, data, pattern_info)
@@ -627,6 +773,12 @@ def add_invalidation_warnings(fig, data, pattern_info, levels):
     
     if pattern_info.get('below_handle'):
         warnings.append("WARNING: Below handle support")
+    
+    if pattern_info.get('consolidation_stale'):
+        warnings.append("WARNING: Consolidation aging")
+    
+    if pattern_info.get('limited_liquidity'):
+        warnings.append(f"WARNING: Limited liquidity - {pattern_info['limited_liquidity']}")
     
     # Add warning annotations
     if warnings:
