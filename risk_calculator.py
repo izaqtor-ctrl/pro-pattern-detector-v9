@@ -1,8 +1,8 @@
 # risk_calculator.py
-# Pattern Detector V8.1 - Trading Level Calculations with Inverse Head & Shoulders
+# Pattern Detector V8.2 - Trading Level Calculations with Consolidation Breakout
 
 from config import (
-    RISK_MULTIPLIERS, MIN_RISK_REWARD_RATIOS, INSIDE_BAR_CONFIG
+    RISK_MULTIPLIERS, MIN_RISK_REWARD_RATIOS, INSIDE_BAR_CONFIG, PATTERN_PARAMS
 )
 
 def calculate_levels(data, pattern_info, pattern_type):
@@ -12,7 +12,9 @@ def calculate_levels(data, pattern_info, pattern_type):
     avg_range = recent_range.mean()
     volatility_stop_distance = avg_range * RISK_MULTIPLIERS['volatility_stop']
     
-    if pattern_type == "Inside Bar":
+    if pattern_type == "Consolidation Breakout":
+        return calculate_consolidation_breakout_levels(data, pattern_info, current_price, volatility_stop_distance)
+    elif pattern_type == "Inside Bar":
         return calculate_inside_bar_levels(pattern_info, current_price)
     elif pattern_type == "Flat Top Breakout":
         return calculate_flat_top_levels(data, pattern_info, current_price, volatility_stop_distance)
@@ -24,6 +26,84 @@ def calculate_levels(data, pattern_info, pattern_type):
         return calculate_inverse_head_shoulders_levels(data, pattern_info, current_price, volatility_stop_distance)
     else:
         return calculate_default_levels(current_price, volatility_stop_distance)
+
+def calculate_consolidation_breakout_levels(data, pattern_info, current_price, volatility_stop_distance):
+    """Consolidation Breakout specific calculations"""
+    params = PATTERN_PARAMS["Consolidation Breakout"]
+    
+    # Get box levels from pattern info
+    box_high = pattern_info.get('box_high', current_price * 1.01)
+    box_low = pattern_info.get('box_low', current_price * 0.95)
+    
+    # Entry: Box high + buffer
+    entry = box_high * (1 + params['entry_buffer'])
+    
+    # Calculate stop candidates
+    
+    # Stop candidate 1: Box low with buffer
+    stop1 = box_low * (1 - params['stop_buffer'])
+    
+    # Stop candidate 2: Volatility-based stop
+    stop2 = entry - volatility_stop_distance
+    
+    # Stop candidate 3: ATR floor (minimum stop distance)
+    if 'ATR14' in data.columns:
+        atr_value = data['ATR14'].iloc[-1]
+        stop3 = entry - (params['stop_atr_floor_mult'] * atr_value)
+    else:
+        # Fallback if ATR not available
+        stop3 = entry * (1 - RISK_MULTIPLIERS['min_stop_distance']['Consolidation Breakout'])
+    
+    # Stop candidate 4: Recent swing low (if available)
+    recent_lows = data['Low'].tail(20)
+    swing_low = recent_lows.min()
+    stop4 = swing_low * 0.995
+    
+    # Use the most conservative (highest) stop that makes sense
+    # But ensure it's below entry
+    stop_candidates = [stop1, stop2, stop3, stop4]
+    valid_stops = [s for s in stop_candidates if s < entry]
+    
+    if valid_stops:
+        stop = max(valid_stops)  # Most conservative valid stop
+    else:
+        # Emergency fallback
+        stop = entry * (1 - RISK_MULTIPLIERS['min_stop_distance']['Consolidation Breakout'])
+    
+    # Calculate targets
+    
+    # Box height for measured move
+    box_height = box_high - box_low
+    
+    # Target 1: 2R minimum or box height, whichever is greater
+    risk_amount = entry - stop
+    target1_2r = entry + (risk_amount * 2.0)
+    target1_measured = entry + box_height
+    target1 = max(target1_2r, target1_measured)
+    
+    # Target 2: 3R minimum or 1.618x box height
+    target2_3r = entry + (risk_amount * 3.0)
+    target2_measured = entry + (box_height * 1.618)
+    target2 = max(target2_3r, target2_measured)
+    
+    # Determine which method was used
+    if target1_measured > target1_2r:
+        target_method = "Box Height Projection"
+    else:
+        target_method = "Risk-Based Targets (2R/3R)"
+    
+    # Create result dictionary
+    result = create_standard_levels_dict(entry, stop, target1, target2, target_method)
+    
+    # Add consolidation-specific information
+    result['box_height'] = box_height
+    result['box_width_pct'] = pattern_info.get('box_width_pct', 0)
+    result['measured_move_target'] = entry + box_height
+    result['box_high'] = box_high
+    result['box_low'] = box_low
+    result['consolidation_bars'] = pattern_info.get('box_bars', 0)
+    
+    return result
 
 def calculate_inside_bar_levels(pattern_info, current_price):
     """Inside Bar specific calculations"""
@@ -376,7 +456,16 @@ def get_level_summary(levels):
         summary['target3'] = {
             'price': f"${levels['target3']:.2f}",
             'reward': f"${levels['reward3']:.2f}",
-            'rr_ratio': f"{levels['rr_ratio3']:.1f}:1"
+            'rr_ratio': f"${levels['rr_ratio3']:.1f}:1"
+        }
+    
+    # Add consolidation-specific info if available
+    if 'box_height' in levels:
+        summary['consolidation_info'] = {
+            'box_height': f"${levels['box_height']:.2f}",
+            'box_width_pct': f"{levels['box_width_pct']:.1%}",
+            'measured_target': f"${levels['measured_move_target']:.2f}",
+            'consolidation_bars': levels['consolidation_bars']
         }
     
     return summary
